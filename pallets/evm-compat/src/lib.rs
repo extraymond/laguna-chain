@@ -97,7 +97,6 @@ mod pallet {
 		frame_system::Config + pallet_contracts::Config + pallet_proxy::Config
 	{
 		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
 		type AddressMapping: AddressMapping<AccountIdOf<Self>>;
 
 		type ContractAddressMapping: AddressMapping<AccountIdOf<Self>>;
@@ -113,7 +112,6 @@ mod pallet {
 
 	#[pallet::origin]
 	pub type Origin = RawOrigin;
-
 	#[pallet::storage]
 	#[pallet::getter(fn has_proxy)]
 	pub type ProxyAccount<T: Config> = StorageMap<_, Blake2_128Concat, H160, AccountIdOf<T>>;

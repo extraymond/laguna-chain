@@ -1,7 +1,7 @@
 use core::str::FromStr;
 
 use crate::{
-	mock::{Call, ChainId, Origin, *},
+	mock::{ChainId, RuntimeCall, RuntimeOrigin, *},
 	Transaction,
 };
 use codec::Encode;
@@ -167,7 +167,7 @@ fn test_basic() {
 
 		// we expect the signature to come from eth signed payload, signing it on the substrate side
 		// will not work
-		assert!(EvmCompat::transact(Origin::signed(acc), eth_signed.clone()).is_err());
+		assert!(EvmCompat::transact(RuntimeOrigin::signed(acc), eth_signed.clone()).is_err());
 
 		let call = crate::Call::<Runtime>::transact { t: eth_signed };
 		let info = call.check_self_contained().unwrap().unwrap();
@@ -211,7 +211,7 @@ fn test_create() {
 
 			// we expect the signature to come from eth signed payload, signing it on the substrate
 			// side will not work
-			assert!(EvmCompat::transact(Origin::signed(acc), eth_signed.clone()).is_err());
+			assert!(EvmCompat::transact(RuntimeOrigin::signed(acc), eth_signed.clone()).is_err());
 
 			let call = crate::Call::<Runtime>::transact { t: eth_signed };
 			let info = call.check_self_contained().unwrap().unwrap();
@@ -221,7 +221,7 @@ fn test_create() {
 			let eth_addr = pair.public().to_eth_address().map(H160).unwrap();
 			assert_eq!(*source, eth_addr);
 
-			assert_ok!(Call::EvmCompat(call).apply_self_contained(info.clone()).unwrap());
+			assert_ok!(RuntimeCall::EvmCompat(call).apply_self_contained(info.clone()).unwrap());
 
 			let mapped_origin = EvmCompat::to_mapped_account(*source);
 
@@ -259,7 +259,7 @@ fn test_create() {
 			let eth_addr = pair.public().to_eth_address().map(H160).unwrap();
 			assert_eq!(*source, eth_addr);
 
-			assert_ok!(Call::EvmCompat(call).apply_self_contained(info.clone()).unwrap());
+			assert_ok!(RuntimeCall::EvmCompat(call).apply_self_contained(info.clone()).unwrap());
 		});
 }
 
@@ -290,7 +290,7 @@ fn test_transfer() {
 
 			// we expect the signature to come from eth signed payload, signing it on the substrate
 			// side will not work
-			assert!(EvmCompat::transact(Origin::signed(acc), eth_signed.clone()).is_err());
+			assert!(EvmCompat::transact(RuntimeOrigin::signed(acc), eth_signed.clone()).is_err());
 
 			let call = crate::Call::<Runtime>::transact { t: eth_signed };
 			let info = call.check_self_contained().unwrap().unwrap();
@@ -300,7 +300,7 @@ fn test_transfer() {
 			let eth_addr = pair.public().to_eth_address().map(H160).unwrap();
 			assert_eq!(*source, eth_addr);
 
-			assert_ok!(Call::EvmCompat(call).apply_self_contained(info.clone()).unwrap());
+			assert_ok!(RuntimeCall::EvmCompat(call).apply_self_contained(info.clone()).unwrap());
 
 			let mapped_account = EvmCompat::to_mapped_account(target);
 
@@ -324,9 +324,10 @@ fn test_proxy() {
 			let source_acc = EvmCompat::to_mapped_account(source_addr);
 			assert_eq!(Balances::free_balance(&source_acc), 2 << 64);
 
-			let call = Call::Balances(pallet_balances::Call::transfer { dest: ALICE, value: 1000 });
+			let call =
+				RuntimeCall::Balances(pallet_balances::Call::transfer { dest: ALICE, value: 1000 });
 			assert!(Proxy::proxy(
-				Origin::signed(ALICE),
+				RuntimeOrigin::signed(ALICE),
 				source_acc.clone(),
 				None,
 				Box::new(call.clone())
@@ -334,7 +335,12 @@ fn test_proxy() {
 			.is_err());
 			assert_ok!(EvmCompat::allow_proxy(source_addr, ALICE));
 
-			assert_ok!(Proxy::proxy(Origin::signed(ALICE), source_acc, None, Box::new(call)));
+			assert_ok!(Proxy::proxy(
+				RuntimeOrigin::signed(ALICE),
+				source_acc,
+				None,
+				Box::new(call)
+			));
 		});
 }
 
@@ -360,7 +366,7 @@ fn test_proxy_self_contained() {
 			};
 			let info = call.check_self_contained().unwrap().unwrap();
 
-			assert_ok!(Call::EvmCompat(call).apply_self_contained(info).unwrap());
+			assert_ok!(RuntimeCall::EvmCompat(call).apply_self_contained(info).unwrap());
 
 			assert_eq!(EvmCompat::has_proxy(dev_addr), Some(ALICE));
 		});
