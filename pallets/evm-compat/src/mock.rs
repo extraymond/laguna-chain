@@ -9,37 +9,74 @@ use frame_support::{
 		traits::{
 			BlakeTwo256, DispatchInfoOf, IdentityLookup, PostDispatchInfoOf, SignedExtension,
 		},
+		Perbill,
 	},
 	traits::Everything,
-	weights::IdentityFee,
+	weights::{
+		constants::{BlockExecutionWeight, ExtrinsicBaseWeight, WEIGHT_REF_TIME_PER_SECOND},
+		IdentityFee,
+	},
 };
 
-use frame_support::sp_runtime::Perbill;
-use pallet_contracts::{
-	weights::WeightInfo, AddressGenerator, DefaultAddressGenerator, DefaultContractAccessWeight,
-};
+use frame_system::limits::{BlockLength, BlockWeights};
+use pallet_contracts::{AddressGenerator, DefaultAddressGenerator};
 use pallet_evm::HashedAddressMapping;
 use pallet_transaction_payment::CurrencyAdapter;
 use primitives::{AccountId, Balance, BlockNumber, Hash, Header, Index};
-use sp_core::{keccak_256, KeccakHasher, H256};
+use sp_core::{keccak_256, ConstBool, KeccakHasher, H256};
 
 type UncheckedExtrinsic = frame_system::mocking::MockUncheckedExtrinsic<Runtime>;
 type Block = frame_system::mocking::MockBlock<Runtime>;
 
-parameter_types! {
-	pub const BlockHashCount: BlockNumber = 250;
-}
+const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
 
+/// We assume that ~10% of the block weight is consumed by `on_initialize` handlers.
+/// This is used to limit the maximal weight of a single extrinsic.
+const AVERAGE_ON_INITIALIZE_RATIO: Perbill = Perbill::from_percent(10);
+
+/// We allow for 2 seconds of compute with a 6 second average block time, with maximum proof size.
+const MAXIMUM_BLOCK_WEIGHT: Weight =
+	Weight::from_parts(WEIGHT_REF_TIME_PER_SECOND.saturating_mul(2), u64::MAX);
+parameter_types! {
+	pub const BlockHashCount: BlockNumber = 2400;
+
+	// This part is copied from Substrate's `bin/node/runtime/src/lib.rs`.
+	//  The `RuntimeBlockLength` and `RuntimeBlockWeights` exist here because the
+	// `DeletionWeightLimit` and `DeletionQueueDepth` depend on those to parameterize
+	// the lazy contract deletion.
+	pub RuntimeBlockLength: BlockLength =
+		BlockLength::max_with_normal_ratio(5 * 1024 * 1024, NORMAL_DISPATCH_RATIO);
+	pub RuntimeBlockWeights: BlockWeights = BlockWeights::builder()
+		.base_block(BlockExecutionWeight::get())
+		.for_class(DispatchClass::all(), |weights| {
+			weights.base_extrinsic = ExtrinsicBaseWeight::get();
+		})
+		.for_class(DispatchClass::Normal, |weights| {
+			weights.max_total = Some(NORMAL_DISPATCH_RATIO * MAXIMUM_BLOCK_WEIGHT);
+		})
+		.for_class(DispatchClass::Operational, |weights| {
+			weights.max_total = Some(MAXIMUM_BLOCK_WEIGHT);
+			// Operational transactions have some extra reserved space, so that they
+			// are included even if block reached `MAXIMUM_BLOCK_WEIGHT`.
+			weights.reserved = Some(
+				MAXIMUM_BLOCK_WEIGHT - NORMAL_DISPATCH_RATIO * MAXIMUM_BLOCK_WEIGHT
+			);
+		})
+		.avg_block_initialization(AVERAGE_ON_INITIALIZE_RATIO)
+		.build_or_panic();
+
+	pub const SS58Prefix: u8 = 42;
+}
 impl frame_system::Config for Runtime {
 	type BaseCallFilter = Everything;
 
-	type BlockWeights = ();
+	type BlockWeights = RuntimeBlockWeights;
 
-	type BlockLength = ();
+	type BlockLength = RuntimeBlockLength;
 
-	type Origin = Origin;
+	type RuntimeOrigin = RuntimeOrigin;
 
-	type Call = Call;
+	type RuntimeCall = RuntimeCall;
 
 	type Index = Index;
 
@@ -55,7 +92,7 @@ impl frame_system::Config for Runtime {
 
 	type Header = Header;
 
-	type Event = Event;
+	type RuntimeEvent = RuntimeEvent;
 
 	type BlockHashCount = BlockHashCount;
 
@@ -77,7 +114,7 @@ impl frame_system::Config for Runtime {
 
 	type OnSetCode = ();
 
-	type MaxConsumers = ConstU32<1>;
+	type MaxConsumers = ConstU32<16>;
 }
 
 parameter_types! {
@@ -87,16 +124,24 @@ parameter_types! {
 impl pallet_balances::Config for Runtime {
 	type Balance = Balance;
 	type DustRemoval = ();
-	type Event = Event;
+	type RuntimeEvent = RuntimeEvent;
 	type ExistentialDeposit = ExistentialDeposit;
 	type AccountStore = frame_system::Pallet<Runtime>;
 	type MaxLocks = ();
 	type MaxReserves = ();
 	type ReserveIdentifier = [u8; 8];
 	type WeightInfo = ();
+
+	type HoldIdentifier = ();
+
+	type FreezeIdentifier = ();
+
+	type MaxHolds = ();
+
+	type MaxFreezes = ();
 }
 
-impl pallet_randomness_collective_flip::Config for Runtime {}
+impl pallet_insecure_randomness_collective_flip::Config for Runtime {}
 
 pub const MILLISECS_PER_BLOCK: u64 = 6000;
 pub const SLOT_DURATION: u64 = MILLISECS_PER_BLOCK;
@@ -119,7 +164,7 @@ parameter_types! {
 
 impl pallet_transaction_payment::Config for Runtime {
 	// TODO: add benchmark around cross pallet interaction between fee
-	type Event = Event;
+	type RuntimeEvent = RuntimeEvent;
 	type OnChargeTransaction = CurrencyAdapter<Balances, ()>;
 	type OperationalFeeMultiplier = OperationalFeeMultiplier;
 	type WeightToFee = IdentityFee<Balance>;
@@ -128,47 +173,41 @@ impl pallet_transaction_payment::Config for Runtime {
 	type LengthToFee = IdentityFee<Balance>;
 }
 
-const AVERAGE_ON_INITIALIZE_RATIO: Perbill = Perbill::from_percent(10);
-
 pub const UNIT: u128 = 100_000_000_000_000;
 const fn deposit(items: u32, bytes: u32) -> Balance {
 	(items as Balance * UNIT + (bytes as Balance) * (5 * UNIT / 10000 / 100)) / 1000000
 }
 
-const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
-
-const WEIGHT_PER_SECOND: Weight = 1_000_000_000_000;
+fn schedule<T: pallet_contracts::Config>() -> pallet_contracts::Schedule<T> {
+	pallet_contracts::Schedule {
+		limits: pallet_contracts::Limits {
+			runtime_memory: 1024 * 1024 * 1024,
+			..Default::default()
+		},
+		..Default::default()
+	}
+}
 
 parameter_types! {
 	pub const DepositPerItem: Balance = deposit(1, 0);
 	pub const DepositPerByte: Balance = deposit(0, 1);
-	pub BlockWeights: frame_system::limits::BlockWeights = frame_system::limits::BlockWeights
-	::with_sensible_defaults(2 * WEIGHT_PER_SECOND, NORMAL_DISPATCH_RATIO);
-	// The lazy deletion runs inside on_initialize.
-	pub DeletionWeightLimit: Weight = AVERAGE_ON_INITIALIZE_RATIO *
-		BlockWeights::get().max_block;
-	pub DeletionQueueDepth: u32 = ((DeletionWeightLimit::get() / (
-			<Runtime as pallet_contracts::Config>::WeightInfo::on_initialize_per_queue_item(1) -
-			<Runtime as pallet_contracts::Config>::WeightInfo::on_initialize_per_queue_item(0)
-		)) / 5) as u32;
-	pub Schedule: pallet_contracts::Schedule<Runtime> = Default::default();
+	pub Schedule: pallet_contracts::Schedule<Runtime> = schedule();
+		pub const DefaultDepositLimit: Balance = deposit(1024, 1024 * 1024);
 }
 
 impl pallet_contracts::Config for Runtime {
 	type Time = Timestamp;
 	type Randomness = RandomnessCollectiveFlip;
 	type Currency = Balances;
-	type Event = Event;
-	type Call = Call;
+	type RuntimeEvent = RuntimeEvent;
+	type RuntimeCall = RuntimeCall;
 
 	type CallFilter = frame_support::traits::Nothing;
 	type WeightPrice = Payment;
 	type WeightInfo = pallet_contracts::weights::SubstrateWeight<Self>;
 	type ChainExtension = ();
 	type Schedule = Schedule;
-	type CallStack = [pallet_contracts::Frame<Self>; 31];
-	type DeletionQueueDepth = DeletionQueueDepth;
-	type DeletionWeightLimit = DeletionWeightLimit;
+	type CallStack = [pallet_contracts::Frame<Self>; 23];
 
 	type DepositPerByte = DepositPerByte;
 
@@ -176,12 +215,15 @@ impl pallet_contracts::Config for Runtime {
 
 	type AddressGenerator = EvmCompatAdderssGenerator;
 
-	// TODO: use arbitrary value now, need to adjust usage later
-	type ContractAccessWeight = DefaultContractAccessWeight<()>;
-
 	type MaxCodeLen = ConstU32<{ 256 * 1024 }>;
-	type RelaxedMaxCodeLen = ConstU32<{ 512 * 1024 }>;
+
 	type MaxStorageKeyLen = ConstU32<128>;
+
+	type DefaultDepositLimit = DefaultDepositLimit;
+
+	type UnsafeUnstableInterface = ConstBool<true>;
+
+	type MaxDebugBufferLen = ConstU32<{ 2 * 1024 * 1024 }>;
 }
 
 parameter_types! {
@@ -194,8 +236,8 @@ parameter_types! {
 }
 
 impl pallet_proxy::Config for Runtime {
-	type Event = Event;
-	type Call = Call;
+	type RuntimeEvent = RuntimeEvent;
+	type RuntimeCall = RuntimeCall;
 	type Currency = Balances;
 	type ProxyType = ();
 	type ProxyDepositBase = ProxyDepositBase;
@@ -209,7 +251,7 @@ impl pallet_proxy::Config for Runtime {
 }
 
 impl Config for Runtime {
-	type Event = Event;
+	type RuntimeEvent = RuntimeEvent;
 	type AddressMapping = HashedAddressMapping<KeccakHasher>;
 
 	type ContractAddressMapping = PlainContractAddressMapping;
@@ -237,15 +279,18 @@ pub struct EvmCompatAdderssGenerator;
 
 type CodeHash<T> = <T as frame_system::Config>::Hash;
 
+/// FIXME: behavior of DefaultAddressGenerator changed, we need to address it in the evm-compat pallet as well
 impl AddressGenerator<Runtime> for EvmCompatAdderssGenerator {
-	fn generate_address(
-		deploying_address: &<Runtime as frame_system::Config>::AccountId,
+	fn contract_address(
+		deploying_address: &AccountIdOf<Runtime>,
 		code_hash: &CodeHash<Runtime>,
+		input_data: &[u8],
 		salt: &[u8],
-	) -> <Runtime as frame_system::Config>::AccountId {
-		let generated = <DefaultAddressGenerator as AddressGenerator<Runtime>>::generate_address(
+	) -> AccountIdOf<Runtime> {
+		let generated = <DefaultAddressGenerator as AddressGenerator<Runtime>>::contract_address(
 			deploying_address,
 			code_hash,
+			input_data,
 			salt,
 		);
 
@@ -254,6 +299,10 @@ impl AddressGenerator<Runtime> for EvmCompatAdderssGenerator {
 		let h_addr = H160::from_slice(&raw[0..20]);
 
 		PlainContractAddressMapping::into_account_id(h_addr)
+	}
+
+	fn deposit_address(contract_addr: &AccountIdOf<Runtime>) -> AccountIdOf<Runtime> {
+		contract_addr.clone()
 	}
 }
 
@@ -269,7 +318,7 @@ construct_runtime!(
 
 		Balances: pallet_balances,
 		Contracts: pallet_contracts,
-		RandomnessCollectiveFlip: pallet_randomness_collective_flip,
+		RandomnessCollectiveFlip: pallet_insecure_randomness_collective_flip,
 		Timestamp: pallet_timestamp,
 		Payment: pallet_transaction_payment,
 		Proxy: pallet_proxy,
@@ -327,19 +376,19 @@ parameter_types! {
 
 type Extra = ();
 
-impl fp_self_contained::SelfContainedCall for Call {
+impl fp_self_contained::SelfContainedCall for RuntimeCall {
 	type SignedInfo = (H160, AccountId, (U256, U256));
 
 	fn is_self_contained(&self) -> bool {
 		match self {
-			Call::EvmCompat(call) => call.is_self_contained(),
+			RuntimeCall::EvmCompat(call) => call.is_self_contained(),
 			_ => false,
 		}
 	}
 
 	fn check_self_contained(&self) -> Option<Result<Self::SignedInfo, TransactionValidityError>> {
 		match self {
-			Call::EvmCompat(call) => call.check_self_contained(),
+			RuntimeCall::EvmCompat(call) => call.check_self_contained(),
 			_ => None,
 		}
 	}
@@ -347,11 +396,11 @@ impl fp_self_contained::SelfContainedCall for Call {
 	fn validate_self_contained(
 		&self,
 		info: &Self::SignedInfo,
-		dispatch_info: &DispatchInfoOf<Call>,
+		dispatch_info: &DispatchInfoOf<RuntimeCall>,
 		len: usize,
 	) -> Option<TransactionValidity> {
-		if let Call::EvmCompat(call) = self {
-			return Some(().validate(&0, &(), &(), len))
+		if let RuntimeCall::EvmCompat(call) = self {
+			return Some(().validate(&0, &(), &(), len));
 		}
 
 		None
@@ -360,11 +409,11 @@ impl fp_self_contained::SelfContainedCall for Call {
 	fn pre_dispatch_self_contained(
 		&self,
 		info: &Self::SignedInfo,
-		dispatch_info: &DispatchInfoOf<Call>,
+		dispatch_info: &DispatchInfoOf<RuntimeCall>,
 		len: usize,
 	) -> Option<Result<(), TransactionValidityError>> {
 		match self {
-			Call::EvmCompat(call) => Some(().pre_dispatch(&0, &(), &(), len)),
+			RuntimeCall::EvmCompat(call) => Some(().pre_dispatch(&0, &(), &(), len)),
 			_ => None,
 		}
 	}
@@ -374,8 +423,9 @@ impl fp_self_contained::SelfContainedCall for Call {
 		info: Self::SignedInfo,
 	) -> Option<sp_runtime::DispatchResultWithInfo<PostDispatchInfoOf<Self>>> {
 		match self {
-			call @ Call::EvmCompat(_) =>
-				Some(call.dispatch(Origin::from(crate::RawOrigin::EthereumTransaction(info.0)))),
+			call @ RuntimeCall::EvmCompat(_) => Some(
+				call.dispatch(RuntimeOrigin::from(crate::RawOrigin::EthereumTransaction(info.0))),
+			),
 			_ => None,
 		}
 	}

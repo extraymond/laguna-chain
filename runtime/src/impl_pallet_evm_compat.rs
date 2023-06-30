@@ -121,8 +121,10 @@ impl BlockFilter for BlockMapper {
 		>,
 	) -> Option<H160> {
 		match record.event {
-			crate::Event::EvmCompat(pallet_evm_compat::Event::PayloadInfo { address, .. }) =>
-				Some(address),
+			crate::Event::EvmCompat(pallet_evm_compat::RuntimeEvent::PayloadInfo {
+				address,
+				..
+			}) => Some(address),
 			_ => None,
 		}
 	}
