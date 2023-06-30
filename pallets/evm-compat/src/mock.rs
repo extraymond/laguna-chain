@@ -9,12 +9,16 @@ use frame_support::{
 		traits::{
 			BlakeTwo256, DispatchInfoOf, IdentityLookup, PostDispatchInfoOf, SignedExtension,
 		},
+		Perbill,
 	},
 	traits::Everything,
-	weights::IdentityFee,
+	weights::{
+		constants::{BlockExecutionWeight, ExtrinsicBaseWeight, WEIGHT_REF_TIME_PER_SECOND},
+		IdentityFee,
+	},
 };
 
-use frame_support::sp_runtime::Perbill;
+use frame_system::limits::{BlockLength, BlockWeights};
 use pallet_contracts::{AddressGenerator, DefaultAddressGenerator};
 use pallet_evm::HashedAddressMapping;
 use pallet_transaction_payment::CurrencyAdapter;
@@ -24,16 +28,51 @@ use sp_core::{keccak_256, ConstBool, KeccakHasher, H256};
 type UncheckedExtrinsic = frame_system::mocking::MockUncheckedExtrinsic<Runtime>;
 type Block = frame_system::mocking::MockBlock<Runtime>;
 
-parameter_types! {
-	pub const BlockHashCount: BlockNumber = 250;
-}
+const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
 
+/// We assume that ~10% of the block weight is consumed by `on_initialize` handlers.
+/// This is used to limit the maximal weight of a single extrinsic.
+const AVERAGE_ON_INITIALIZE_RATIO: Perbill = Perbill::from_percent(10);
+
+/// We allow for 2 seconds of compute with a 6 second average block time, with maximum proof size.
+const MAXIMUM_BLOCK_WEIGHT: Weight =
+	Weight::from_parts(WEIGHT_REF_TIME_PER_SECOND.saturating_mul(2), u64::MAX);
+parameter_types! {
+	pub const BlockHashCount: BlockNumber = 2400;
+
+	// This part is copied from Substrate's `bin/node/runtime/src/lib.rs`.
+	//  The `RuntimeBlockLength` and `RuntimeBlockWeights` exist here because the
+	// `DeletionWeightLimit` and `DeletionQueueDepth` depend on those to parameterize
+	// the lazy contract deletion.
+	pub RuntimeBlockLength: BlockLength =
+		BlockLength::max_with_normal_ratio(5 * 1024 * 1024, NORMAL_DISPATCH_RATIO);
+	pub RuntimeBlockWeights: BlockWeights = BlockWeights::builder()
+		.base_block(BlockExecutionWeight::get())
+		.for_class(DispatchClass::all(), |weights| {
+			weights.base_extrinsic = ExtrinsicBaseWeight::get();
+		})
+		.for_class(DispatchClass::Normal, |weights| {
+			weights.max_total = Some(NORMAL_DISPATCH_RATIO * MAXIMUM_BLOCK_WEIGHT);
+		})
+		.for_class(DispatchClass::Operational, |weights| {
+			weights.max_total = Some(MAXIMUM_BLOCK_WEIGHT);
+			// Operational transactions have some extra reserved space, so that they
+			// are included even if block reached `MAXIMUM_BLOCK_WEIGHT`.
+			weights.reserved = Some(
+				MAXIMUM_BLOCK_WEIGHT - NORMAL_DISPATCH_RATIO * MAXIMUM_BLOCK_WEIGHT
+			);
+		})
+		.avg_block_initialization(AVERAGE_ON_INITIALIZE_RATIO)
+		.build_or_panic();
+
+	pub const SS58Prefix: u8 = 42;
+}
 impl frame_system::Config for Runtime {
 	type BaseCallFilter = Everything;
 
-	type BlockWeights = ();
+	type BlockWeights = RuntimeBlockWeights;
 
-	type BlockLength = ();
+	type BlockLength = RuntimeBlockLength;
 
 	type RuntimeOrigin = RuntimeOrigin;
 
@@ -75,7 +114,7 @@ impl frame_system::Config for Runtime {
 
 	type OnSetCode = ();
 
-	type MaxConsumers = ConstU32<1>;
+	type MaxConsumers = ConstU32<16>;
 }
 
 parameter_types! {
@@ -134,22 +173,26 @@ impl pallet_transaction_payment::Config for Runtime {
 	type LengthToFee = IdentityFee<Balance>;
 }
 
-const AVERAGE_ON_INITIALIZE_RATIO: Perbill = Perbill::from_percent(10);
-
 pub const UNIT: u128 = 100_000_000_000_000;
 const fn deposit(items: u32, bytes: u32) -> Balance {
 	(items as Balance * UNIT + (bytes as Balance) * (5 * UNIT / 10000 / 100)) / 1000000
 }
 
-const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
-
-const WEIGHT_PER_SECOND: u64 = 1_000_000_000_000;
+fn schedule<T: pallet_contracts::Config>() -> pallet_contracts::Schedule<T> {
+	pallet_contracts::Schedule {
+		limits: pallet_contracts::Limits {
+			runtime_memory: 1024 * 1024 * 1024,
+			..Default::default()
+		},
+		..Default::default()
+	}
+}
 
 parameter_types! {
 	pub const DepositPerItem: Balance = deposit(1, 0);
 	pub const DepositPerByte: Balance = deposit(0, 1);
-	pub Schedule: pallet_contracts::Schedule<Runtime> = Default::default();
-	pub const DefaultDepositLimit: Balance = deposit(1024, 1024 * 1024);
+	pub Schedule: pallet_contracts::Schedule<Runtime> = schedule();
+		pub const DefaultDepositLimit: Balance = deposit(1024, 1024 * 1024);
 }
 
 impl pallet_contracts::Config for Runtime {
@@ -236,25 +279,8 @@ pub struct EvmCompatAdderssGenerator;
 
 type CodeHash<T> = <T as frame_system::Config>::Hash;
 
+/// FIXME: behavior of DefaultAddressGenerator changed, we need to address it in the evm-compat pallet as well
 impl AddressGenerator<Runtime> for EvmCompatAdderssGenerator {
-	// fn generate_address(
-	// 	deploying_address: &<Runtime as frame_system::Config>::AccountId,
-	// 	code_hash: &CodeHash<Runtime>,
-	// 	salt: &[u8],
-	// ) -> <Runtime as frame_system::Config>::AccountId {
-	// 	let generated = <DefaultAddressGenerator as AddressGenerator<Runtime>>::generate_address(
-	// 		deploying_address,
-	// 		code_hash,
-	// 		salt,
-	// 	);
-
-	// 	let raw: [u8; 32] = generated.into();
-
-	// 	let h_addr = H160::from_slice(&raw[0..20]);
-
-	// 	PlainContractAddressMapping::into_account_id(h_addr)
-	// }
-
 	fn contract_address(
 		deploying_address: &AccountIdOf<Runtime>,
 		code_hash: &CodeHash<Runtime>,
